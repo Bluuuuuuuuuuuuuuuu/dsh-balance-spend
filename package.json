@@ -15,6 +15,14 @@
   ],
   "license": "MIT",
   "author": "Ry",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bluuuuuuuuuuuuuuuu/dsh-balance-spend.git"
+  },
+  "homepage": "https://github.com/Bluuuuuuuuuuuuuuuu/dsh-balance-spend#readme",
+  "bugs": {
+    "url": "https://github.com/Bluuuuuuuuuuuuuuuu/dsh-balance-spend/issues"
+  },
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
