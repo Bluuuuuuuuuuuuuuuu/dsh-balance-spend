@@ -1,0 +1,38 @@
+- insert:
+    - id: balance-spend
+      name: 'dsh-balance-spend'
+      config:
+        # A Session row shows nothing while its accumulated spend is cheaper
+        # than this, in `currency` units. Default 2 (CNY).
+        minCostToShow: 2
+        currency: CNY
+        # Client poll interval in seconds, and how long one balance reading is
+        # reused before asking the host again.
+        refreshSeconds: 30
+        balanceTtlSeconds: 60
+        # CNY per 1,000,000 tokens. Keys are "provider/model", a bare "model",
+        # or "provider/*". An unmatched provider falls back to `default` and
+        # then to the priciest entry here (with a console warning), so add every
+        # provider you actually run. `cacheWrite` defaults to `cacheMiss`.
+        pricing:
+          deepseek-account/deepseek-flash:
+            cacheHit: 0.04
+            cacheMiss: 2
+            cacheWrite: 2
+            output: 8
+          deepseek-account/deepseek-v4-pro:
+            cacheHit: 0.15
+            cacheMiss: 4.5
+            cacheWrite: 4.5
+            output: 13.5
+          # Anthropic list prices (USD 3 / 15 per 1M for Sonnet) at ~7.15 CNY/USD.
+          claude/default:
+            cacheHit: 2.15
+            cacheMiss: 21.5
+            cacheWrite: 26.9
+            output: 107
+          claude/opus:
+            cacheHit: 10.7
+            cacheMiss: 107
+            cacheWrite: 134
+            output: 536
