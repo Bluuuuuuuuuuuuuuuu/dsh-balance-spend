@@ -12,3 +12,4 @@ First public release, consolidating the private `account-meter` build.
 - Subagent sessions merged into their nearest non-subagent ancestor; orphaned subagents are skipped.
 - Cold session logs folded through `sessionQuery` and cached by persistence revision; live sessions folded incrementally from `snapshotEvents`.
 - Read-only `GET /dsh-balance-spend/state` route polled while the page is visible; the client echoes its bundle version and stylesheet mode back so a stale page is detectable.
+- Live estimate for the in-flight model call (`≈`): streamed deltas become output tokens, the prompt comes from `tokenMeter.measure()` and is priced with the previous call's cache-hit mix; the logged `usage` replaces it on commit, and the page polls every 5 s while a round is open.

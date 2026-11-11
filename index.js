@@ -151,6 +151,23 @@ export function costOfUsage(usage, provider, model, pricing) {
   return (miss * price.cacheMiss + hit * price.cacheHit + write * writePrice + output * price.output) / 1_000_000
 }
 
+/**
+ * Cheap token estimate for streamed text. A model call reports its real `usage`
+ * only when it lands, so the streamed deltas are the only live progress signal a
+ * running round has. Wide scripts (CJK) cost about one token per character,
+ * latin text about four characters per token; the provider's usage replaces
+ * this as soon as the call commits.
+ */
+export function estimateTokens(text) {
+  if (typeof text !== 'string' || text.length === 0) return 0
+  let wide = 0
+  for (const char of text) {
+    if ((char.codePointAt(0) ?? 0) > 0x2e80) wide += 1
+  }
+  const narrow = Math.max(0, text.length - wide)
+  return Math.ceil(wide + narrow / 4)
+}
+
 function round(value, digits) {
   const factor = 10 ** digits
   return Math.round(value * factor) / factor
@@ -206,6 +223,14 @@ export function createMeter(rawConfig, ctx) {
    * instead of hiding it forever.
    */
   const coldFailures = new Map()
+  /**
+   * sessionId -> { provider, model, tokens, usage, at }. The newest model call
+   * that is still streaming: the loop only appends its `usage` when the call
+   * lands, so until then this is the only live progress a running round has.
+   */
+  const streams = new Map()
+  /** sessionId -> { at, tokens }. `tokenMeter.measure` is O(surface), so cache it. */
+  const promptCache = new Map()
 
   let balance = null
   let balanceAt = 0
@@ -218,6 +243,107 @@ export function createMeter(rawConfig, ctx) {
    * session list; see `isSubagentHeader`.
    */
   const isSubagent = (header) => isSubagentHeader(header)
+
+  /** The live `Session` behind an id, when the session store still holds it. */
+  function sessionOf(id) {
+    const store = ctx.get('sessions')
+    if (typeof store?.get !== 'function') return null
+    try {
+      return store.get(id) ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /** The provider/model the next call of a session is routed to. */
+  function routeOf(session) {
+    const context = typeof session?.requestContext === 'function' ? session.requestContext() : null
+    const header = typeof session?.requestHeader === 'function' ? session.requestHeader() : null
+    const call = header?.config
+    return {
+      provider: String(context?.provider ?? call?.provider ?? ''),
+      model: String(context?.model ?? call?.model ?? ''),
+    }
+  }
+
+  /**
+   * Follow one assistant stream. A chunk carries no money, but its deltas are
+   * tokens the provider will bill, and some providers publish a `usage` chunk
+   * before the stream ends — that, when present, is exact.
+   */
+  function observeStream(payload) {
+    const id = payload?.agent?.id
+    const frame = payload?.frame
+    if (!id || !frame || typeof frame !== 'object') return
+    if (frame.type === 'end') {
+      streams.delete(id)
+      return
+    }
+    let record = streams.get(id)
+    if (!record) {
+      const route = routeOf(sessionOf(id))
+      record = { provider: route.provider, model: route.model, tokens: 0, usage: null, at: Date.now() }
+      streams.set(id, record)
+    }
+    if (frame.type !== 'chunk') return
+    const chunk = frame.chunk
+    if (!chunk || typeof chunk !== 'object') return
+    if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+      record.tokens += estimateTokens(String(chunk.text ?? ''))
+    } else if (chunk.type === 'tool-call-delta') {
+      record.tokens += estimateTokens(String(chunk.argumentsDelta ?? ''))
+    } else if (chunk.type === 'usage' && chunk.usage && typeof chunk.usage === 'object') {
+      record.usage = chunk.usage
+    }
+    record.at = Date.now()
+  }
+
+  /** The harness's own estimate of the prompt the next call will send. */
+  function promptTokens(id, session) {
+    const meter = ctx.get('tokenMeter')
+    if (typeof meter?.measure !== 'function' || !session) return 0
+    const now = Date.now()
+    const cached = promptCache.get(id)
+    if (cached && now - cached.at < 3000) return cached.tokens
+    let measured = 0
+    try {
+      measured = numberOr(meter.measure(session)?.totalTokens, 0)
+    } catch {
+      measured = 0
+    }
+    const tokens = measured > 0 ? measured : 0
+    promptCache.set(id, { at: now, tokens })
+    return tokens
+  }
+
+  /**
+   * Money for the model call that is in flight right now. The prompt is priced
+   * with the cache-hit mix of the session's previous call (a continuation is
+   * mostly cache reads), the streamed output at the output rate. Returns 0 when
+   * nothing is streaming; the row is flagged `estimated` so the Client can show
+   * the number as a projection rather than a logged charge.
+   */
+  function estimateOpenTurn(id, entry) {
+    const stream = streams.get(id)
+    if (!stream) return 0
+    // A stream silent for minutes belongs to an attempt that is gone.
+    if (Date.now() - stream.at > 120_000) {
+      streams.delete(id)
+      return 0
+    }
+    if (stream.usage && typeof stream.usage === 'object') {
+      return costOfUsage(stream.usage, stream.provider, stream.model, pricing)
+    }
+    const session = sessionOf(id)
+    const route = stream.provider || stream.model ? stream : routeOf(session)
+    const price = priceFor(pricing, route.provider, route.model)
+    const prompt = promptTokens(id, session)
+    const mix = Math.max(0, Math.min(1, numberOr(entry?.mix, 0)))
+    const miss = prompt * (1 - mix)
+    const hit = prompt * mix
+    const output = Math.max(0, numberOr(stream.tokens, 0))
+    return (miss * price.cacheMiss + hit * price.cacheHit + output * price.output) / 1_000_000
+  }
 
   function foldEvent(entry, event) {
     if (!event || typeof event !== 'object') return
@@ -251,6 +377,12 @@ export function createMeter(rawConfig, ctx) {
     if (!usage || typeof usage !== 'object') return
     const source = data.message?.source ?? {}
     entry.cost += costOfUsage(usage, source.provider, source.model, pricing)
+    // Cache-hit share of this call's prompt: the next call of the same session
+    // looks much the same, so an in-flight estimate can price its prompt without
+    // assuming every token is a cache miss.
+    const miss = numberOr(usage.inputTokens, 0)
+    const hit = numberOr(usage.cacheReadTokens, 0)
+    if (miss + hit > 0) entry.mix = hit / (miss + hit)
     // One `assistant/message` is one model call; `data.turn` restarts per run,
     // so it cannot count how much work a Session has done.
     entry.calls += 1
@@ -280,6 +412,8 @@ export function createMeter(rawConfig, ctx) {
           turnMs: 0,
           totalMs: 0,
           open: false,
+          // Cache-hit share of the prompt, learned from the previous call.
+          mix: 0,
           subagent: isSubagent(session?.header),
           parentId: session?.header?.parentSession ?? null,
         }
@@ -294,6 +428,9 @@ export function createMeter(rawConfig, ctx) {
       }
       if (Array.isArray(events)) {
         for (const event of events) foldEvent(entry, event)
+        // The call's real usage just landed: drop its stream estimate so the
+        // same money is never counted twice.
+        if (events.some((event) => event?.type === 'assistant/message')) streams.delete(id)
         if (events.length > 0) entry.seq = from + events.length
       }
       const seq = typeof session.seq === 'number' ? session.seq : null
@@ -380,6 +517,7 @@ export function createMeter(rawConfig, ctx) {
           turnMs: 0,
           totalMs: 0,
           open: false,
+          mix: 0,
           subagent: isSubagent(header),
           parentId: header?.parentSession ?? null,
         }
@@ -455,6 +593,19 @@ export function createMeter(rawConfig, ctx) {
     // A live tail is always fresher than the last cold fold of the same session.
     for (const [id, entry] of live) collect(id, entry)
 
+    // A call that is still streaming has no logged `usage` yet, so the first
+    // money of a round would read 0 for the whole flight. Add the streamed
+    // estimate to the row and mark it, so a running round ticks instead of
+    // sitting at zero; the logged usage replaces it the moment the call lands.
+    for (const [id, row] of rows) {
+      if (!row.open) continue
+      const estimate = estimateOpenTurn(id, live.get(id) ?? cold.get(id))
+      if (!(estimate > 0)) continue
+      row.cost += estimate
+      row.turnCost += estimate
+      row.estimated = true
+    }
+
     // A delegated Session has no row of its own: its money is billed to the
     // Session that started it, which is the row the sidebar actually shows.
     const rootOf = (id) => {
@@ -482,6 +633,7 @@ export function createMeter(rawConfig, ctx) {
       root.turnMs = Math.max(root.turnMs, row.turnMs)
       root.totalMs += row.totalMs
       root.open = root.open || row.open === true
+      root.estimated = root.estimated === true || row.estimated === true
       root.children += 1
     }
 
@@ -497,6 +649,9 @@ export function createMeter(rawConfig, ctx) {
         totalMs: row.totalMs,
         // True while the newest turn has not ended yet (its money lands later).
         open: row.open === true,
+        // True when part of the money is the in-flight stream estimate, not a
+        // logged charge: the Client prefixes it instead of claiming precision.
+        estimated: row.estimated === true,
         // Kept so the Client can skip delegated rows even before the merge.
         subagent: row.subagent,
         // How many delegated Sessions are folded into this row's numbers.
@@ -564,12 +719,20 @@ export function createMeter(rawConfig, ctx) {
     refreshLive,
     refreshBalance,
     refreshCold,
+    observeStream,
     state: { live, cold, get balance() { return balance } },
   }
 }
 
 export function apply(ctx, rawConfig) {
   const meter = createMeter(rawConfig, ctx)
+
+  // The assistant stream is the only live signal of a call that has not landed
+  // yet; following it lets a running round show a moving estimate.
+  ctx.effect(
+    () => ctx.on('agent/assistant-stream', (payload) => meter.observeStream(payload)),
+    'balance-spend:stream',
+  )
 
   ctx.inject(['webServer'], (hostCtx) => {
     const webServer = hostCtx.webServer ?? ctx.get('webServer')
@@ -600,4 +763,4 @@ export function apply(ctx, rawConfig) {
   })()
 }
 
-export const __test = { normalizeConfig, costOfUsage, priceFor, isSubagentHeader }
+export const __test = { normalizeConfig, costOfUsage, priceFor, isSubagentHeader, estimateTokens }

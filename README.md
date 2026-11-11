@@ -71,7 +71,8 @@ cost = (inputTokens × cacheMiss + cacheReadTokens × cacheHit
 `inputTokens` 是不含缓存命中的输入量，`cacheReadTokens` / `cacheWriteTokens` 分开计，模型与厂商取自 `message.source`。一次 `assistant/message` 记一次模型调用。
 
 - **累计**：该会话日志里所有调用的和。
-- **本轮**：最近一个 `turn/start` 之后的调用之和；新一轮刚开始、第一次模型调用还没返回时是 0（日志里确实还没有这笔钱）。
+- **本轮**：最近一个 `turn/start` 之后的调用之和；新一轮刚开始、第一次模型调用还没返回时，会补上一个带 `≈` 的**实时估算**（见下）。
+- **实时估算**：正在流式输出的那次调用还没有 `usage`，插件订阅宿主的 `agent/assistant-stream`，用已经流出的文本按 token 估算输出量（中日韩字符约 1 token/字，拉丁文本约 4 字符/token），输入量取自 `tokenMeter.measure()`（宿主自己的上下文估算），输入按上一次调用的缓存命中比例定价。调用一落地，日志里的真实 `usage` 立刻覆盖估算，`≈` 随之消失。有会话处于运行中时，客户端轮询从 `refreshSeconds` 缩短到 5 秒。
 - **子代理**：`origin: 'subagent'` 或 `delegationDepth > 0` 的会话不单独成行，金额并入最近的父会话，悬停卡片里给出「其中子代理」的份额。父会话不在快照里的孤儿子代理不会被认领，避免张冠李戴。
 - **冷会话**：已结束的会话日志用 `sessionQuery` 读取，按持久化 revision 缓存，重启后分批补齐。
 
@@ -81,7 +82,8 @@ cost = (inputTokens × cacheMiss + cacheReadTokens × cacheHit
 
 - 价格是**牌价估算**，不是平台发票；折扣、赠送额度、缓存写入计费规则的差异都可能让数字与真实扣费不同。
 - 从其他工具导入的会话（例如只有 user/assistant 文本、没有 `usage` 的转录）无法计价，显示为 ¥0。
-- 一轮刚开始、或整个会话还没有过一次模型调用时，金额只能是 0——这是日志的事实，不是漏算。
+- 一轮刚开始、或整个会话还没有过一次模型调用时，金额只能是 0——这是日志的事实，不是漏算；从流式输出开始，插件会给出带 `≈` 的实时估算。
+- `≈` 金额是流式估算，不是账单：输出 token 由文本长度推算，输入量取自宿主的上下文估算，可能与真实扣费有偏差；调用落地后会立即换成真实值。
 - 需要桌面版/网页版的侧栏与工作区包（`@deepseek-ai/dsh-client-ui-sidebar`、`-workspace`）；纯终端界面没有这些槽位。
 - 行内金额在悬停、聚焦或菜单打开时会被宿主隐藏，这是槽位契约本身的行为。
 
@@ -108,6 +110,6 @@ node test-client.mjs  # Client 半分：在 vm 里加载 client.js，断言四�
 
 Costs are folded locally from each session log's `assistant/message` usage with the configurable `pricing` table (CNY per 1M tokens, keys `provider/model`, `model` or `provider/*`). Subagent sessions are merged into their nearest non-subagent ancestor. Nothing is written to the session log; the only network call is the host's balance request.
 
-Prices are list-price estimates, not an invoice. Imported transcripts without `usage` cannot be priced and show ¥0. A brand-new turn shows 0 until its first model call returns — that money is simply not in the log yet, which is why the footer also shows running time.
+Prices are list-price estimates, not an invoice. Imported transcripts without `usage` cannot be priced and show ¥0. A brand-new turn shows 0 until its first model call starts streaming; from then on the plugin shows an `≈` live estimate (streamed tokens for output, `tokenMeter.measure()` for the prompt, priced with the previous call's cache-hit mix) and replaces it with the logged `usage` the moment the call lands. While any round is open the page polls every 5 s.
 
 MIT licensed.

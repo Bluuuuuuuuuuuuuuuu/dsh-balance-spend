@@ -31,8 +31,11 @@ window.__ModuleLoader__.load({
     const ENDPOINT = new URL('/dsh-balance-spend/state'.replace(/^\/+/, ''), document.baseURI).pathname
     // Echoed by the Host, so `/dsh-balance-spend/state` proves which bundle a
     // page is actually running instead of guessing from cached assets.
-    const CLIENT_VERSION = '2026-11-11.1'
+    const CLIENT_VERSION = '2026-11-12.1'
     const POLL_MS = 30_000
+    // While a round is open its money is a moving estimate, so the page polls at
+    // this cadence instead of the configured one to keep the number alive.
+    const LIVE_MS = 5_000
     const FALLBACK_MIN = 2
 
     // ---------------------------------------------------------------- store
@@ -142,6 +145,11 @@ window.__ModuleLoader__.load({
       return fixed(amount, 2)
     }
 
+    /** `≈` marks money that is still the in-flight estimate, not a logged charge. */
+    function marked(amount, currency, digits, estimated) {
+      return `${estimated ? '≈' : ''}${money(amount, currency, digits)}`
+    }
+
     function money(amount, currency, digits = 2) {
       return `${symbolOf(currency)}${fixed(amount, digits)}`
     }
@@ -232,7 +240,7 @@ window.__ModuleLoader__.load({
           className: 'am-spend',
           title: `${translate('spend', locale)}: ${money(entry.cost, currency)}`,
         },
-        `${symbolOf(currency)}${compact(entry.cost)}`,
+        `${entry.estimated ? '≈' : ''}${symbolOf(currency)}${compact(entry.cost)}`,
       )
     }
 
@@ -251,7 +259,7 @@ window.__ModuleLoader__.load({
           h(
             'span',
             { className: 'am-hover-value' },
-            `${money(entry.cost, currency)} · ${entry.calls} ${translate('calls', locale)}`,
+            `${marked(entry.cost, currency, 2, entry.estimated === true)} · ${entry.calls} ${translate('calls', locale)}`,
           ),
         ),
         entry.turnCost > 0
@@ -259,7 +267,7 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'am-hover' },
               h('span', { className: 'am-hover-label' }, translate('turn', locale)),
-              h('span', { className: 'am-hover-value' }, money(entry.turnCost, currency)),
+              h('span', { className: 'am-hover-value' }, marked(entry.turnCost, currency, 2, entry.estimated === true)),
             )
           : null,
         entry.children > 0
@@ -314,6 +322,8 @@ window.__ModuleLoader__.load({
             turnCost: entry && entry.turnCost > 0 ? entry.turnCost : 0,
             turnMs,
             totalMs: entry?.totalMs ?? 0,
+            // Part of the money is the live stream estimate, not a logged charge.
+            estimated: entry?.estimated === true,
           })
         }
       }
@@ -347,12 +357,12 @@ window.__ModuleLoader__.load({
               h(
                 'span',
                 { className: 'am-running-turn' },
-                `${translate('turn', locale)} ${span(row.turnMs)}/${yuanOf(row.turnCost, currency)}`,
+                `${translate('turn', locale)} ${span(row.turnMs)}/${marked(row.turnCost, currency, 0, row.estimated)}`,
               ),
               h(
                 'span',
                 { className: 'am-running-total' },
-                `${translate('total', locale)} ${span(row.totalMs)}/${yuanOf(row.cost, currency)}`,
+                `${translate('total', locale)} ${span(row.totalMs)}/${marked(row.cost, currency, 0, row.estimated)}`,
               ),
             ),
           ),
@@ -440,11 +450,17 @@ window.__ModuleLoader__.load({
           let stopped = false
           let timer = null
           // The Host echoes its `refreshSeconds` config, so the poll cadence is
-          // configurable instead of compiled in: read it after every round.
+          // configurable instead of compiled in: read it after every round. An
+          // open round polls faster, because its money is a moving estimate.
           const schedule = () => {
             if (stopped) return
+            const sessions = current.data?.sessions
+            const live = sessions && typeof sessions === 'object'
+              ? Object.keys(sessions).some((id) => sessions[id]?.open === true)
+              : false
             const seconds = Number(current.data?.refreshSeconds)
-            const delay = Number.isFinite(seconds) && seconds >= 2 ? seconds * 1000 : POLL_MS
+            const configured = Number.isFinite(seconds) && seconds >= 2 ? seconds * 1000 : POLL_MS
+            const delay = live ? Math.min(configured, LIVE_MS) : configured
             timer = setTimeout(() => {
               if (!stopped && !document.hidden) load(true)
               schedule()

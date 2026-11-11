@@ -2,7 +2,7 @@
 // a fake Sessions store, so the money/turn/clock fold is checked without a live
 // Harness. Run: node test-host.mjs
 import assert from 'node:assert'
-import { createMeter } from './index.js'
+import { createMeter, estimateTokens } from './index.js'
 
 const now = Date.now()
 
@@ -51,7 +51,8 @@ const sessions = [
 
 const ctx = {
   get(name) {
-    if (name === 'sessions') return { list: () => sessions }
+    if (name === 'sessions') return { list: () => sessions, get: (id) => sessions.find((s) => s.id === id) ?? null }
+    if (name === 'tokenMeter') return { measure: () => ({ totalTokens: 1_000 }) }
     if (name === 'deepseekAccount')
       return { getBalance: async () => ({ status: 'ready', value: [{ currency: 'CNY', balance: '42.5' }] }) }
     return undefined
@@ -82,6 +83,25 @@ assert.equal(data.minCostToShow, 2)
 // Subagents are never their own row in the sidebar.
 assert.equal(Object.keys(data.sessions).length, 2)
 
+// A running round has no logged usage yet: the streamed text becomes a marked
+// estimate, so the number moves instead of sitting at 0.
+meter.observeStream({ agent: { id: 'session-root' }, frame: { type: 'start', attemptId: 'a1', revision: 1, turn: 2, step: 1 } })
+meter.observeStream({
+  agent: { id: 'session-root' },
+  frame: { type: 'chunk', attemptId: 'a1', revision: 1, index: 0, time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'hello world, this is a streamed answer.' } },
+})
+const live = meter.snapshot().sessions['session-root']
+assert.equal(live.estimated, true, 'the open round is marked as an estimate')
+assert.ok(live.cost > root.cost, `the estimate adds money while the call streams, got ${live.cost}`)
+assert.ok(live.cost - root.cost < 0.05, `the estimate stays a small projection, got ${live.cost - root.cost}`)
+assert.equal(estimateTokens('你好'), 2, 'wide scripts cost about one token per character')
+assert.equal(estimateTokens('abcd'), 1)
+
+// The stream ending drops the estimate: the logged `assistant/message` owns the
+// money from then on.
+meter.observeStream({ agent: { id: 'session-root' }, frame: { type: 'end', attemptId: 'a1', revision: 1, index: 0, outcome: { kind: 'committed', eventType: 'assistant/message', seq: events.length } } })
+assert.equal(meter.snapshot().sessions['session-root'].estimated, false)
+
 console.log('host test ok:', {
   cost: root.cost,
   turnCost: root.turnCost,
@@ -89,4 +109,5 @@ console.log('host test ok:', {
   totalMs: root.totalMs,
   children: root.children,
   balance: data.balance,
+  estimatedCost: live.cost,
 })

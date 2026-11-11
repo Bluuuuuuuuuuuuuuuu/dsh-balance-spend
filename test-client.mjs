@@ -53,6 +53,18 @@ const sandbox = {
           children: 0,
         },
         'session-agent': { cost: 4.2, calls: 40, turnCost: 1.1, turnMs: 0, totalMs: 0, subagent: true, children: 0 },
+        'session-est': {
+          cost: 3.2,
+          calls: 12,
+          turnCost: 3.2,
+          turnMs: 0,
+          totalMs: 0,
+          open: true,
+          // The in-flight stream estimate: money that is not a logged charge yet.
+          estimated: true,
+          subagent: false,
+          children: 0,
+        },
         'session-fresh': {
           cost: 0,
           calls: 0,
@@ -154,6 +166,11 @@ const poor = registrations.find((entry) => entry.options.name === 'sidebar.sessi
   sessionId: 'session-poor',
 })
 assert.equal(poor, null, 'below the threshold nothing is rendered')
+
+const estimated = registrations.find((entry) => entry.options.name === 'sidebar.session.row.trailing').component({
+  sessionId: 'session-est',
+})
+assert.equal(text(estimated), '≈¥3.2', 'money from the live stream is marked as an estimate')
 
 const detail = registrations.find((entry) => entry.options.name === 'sidebar.session.row.hover').component({
   sessionId: 'session-rich',
