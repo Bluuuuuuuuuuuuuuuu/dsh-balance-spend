@@ -1,33 +1,46 @@
 
 # Publishing notes
 
-npm requires 2FA (or a granular token with "bypass 2FA") to publish. The account
-`ren466538539` currently has `tfa: false`, so `npm publish` answers:
+## Where it stands (2026-11-11)
 
-    403 Two-factor authentication or granular access token with bypass 2fa enabled is required
+`npm publish` with a bypass-2FA granular token no longer publishes directly. npm is
+retiring direct publish for those tokens (target January 2027) and now **stages** the
+version instead: the registry keeps a placeholder `dsh-balance-spend@0.0.0-stage`
+("Temporary package placeholder for staged publishing") and the real `1.0.0` tarball
+waits in the stage queue until a maintainer approves it with **interactive 2FA**.
 
-## Path A — enable 2FA, publish with a one-time code
+Observed on this account (`ren466538539`, `tfa: false`):
+
+    409 Conflict - PUT https://registry.npmjs.org/dsh-balance-spend
+        - Cannot publish over previously staged version "1.0.0"
+    npm stage list  -> No staged packages found      (needs an authenticated 2FA session)
+    npm profile get -> 403                           (granular tokens cannot read the profile)
+
+Background: [Staged publishing](https://docs.npmjs.com/staged-publishing),
+[stage-only tokens](https://github.blog/changelog/2026-09-18-stage-only-npm-tokens-for-safer-automation/),
+[bypass-2FA restriction](https://github.blog/changelog/2026-07-31-restricting-npm-bypass-2fa-granular-access-tokens/).
+
+## What unblocks it
+
+2FA must be enabled once on the account — a token cannot approve its own stage.
 
 1. https://www.npmjs.com/settings/ren466538539/profile → Two-factor authentication → Enable
-2. Scan the QR with any authenticator app; the 6-digit npm code lives there (30 s rotation)
-3. `npm publish --otp=<code>`
-
-## Path B — granular token (no code per publish)
-
-1. Enable 2FA as above (npm requires it before a bypass token can be created)
-2. https://www.npmjs.com/settings/ren466538539/tokens → Generate New Token → Granular
-   - Packages: read and write (all, or just `dsh-balance-spend`)
-   - "Bypass 2FA" checked
-3. `NPM_TOKEN=<token> npm publish` (or `npm config set //registry.npmjs.org/:_authToken <token>`)
-4. Revoke the token afterwards.
+2. In a normal terminal: `npm login` (browser) — this session carries 2FA
+3. Approve the staged release: `npm stage list` → `npm stage approve <stage-id>`
+   (or publish the same content again with a code: bump to `1.0.1`, then
+   `npm publish --otp=<code>`)
+4. Revoke the stage/publish token used for the staged attempt; it keeps package write
+   rights (dist-tags, deprecate).
 
 ## GitHub
 
     gh auth login --hostname github.com --git-protocol https --web
     gh repo create dsh-balance-spend --public --source . --push
-    gh repo view --web
+
+`gh` lives at `C:\Program Files\GitHub CLI\gh.exe` (installed with winget); a shell
+opened before the install does not have it on PATH.
 
 Then PR the market listing to `awesome-dsh-plugin/awesome-dsh-plugin`: add one line
-under "Usage & Billing":
+under "Usage & Billing", keeping the section alphabetical:
 
-    - [<owner>/dsh-balance-spend](https://github.com/<owner>/dsh-balance-spend) - Account balance beside the Harness mark, per-session spend and a running-session spend list for DeepSeek Harness.
+    - [<owner>/dsh-balance-spend](https://github.com/<owner>/dsh-balance-spend) - Account balance beside the Harness mark, per-session spend, and a sidebar-foot list of what running sessions are spending, priced from each session log's token usage.
